@@ -2,8 +2,6 @@ package com.martindisch.accelerometer;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
@@ -35,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.LinkedList;
 import java.util.Locale;
-import java.util.UUID;
 
 /**
  * Fragment showing data for a connected device.
@@ -50,7 +47,6 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
     private Calendar previousRead;
 
     private BluetoothAdapter mBluetoothAdapter;
-    private BluetoothGatt mGatt;
     private BluetoothGattService mMovService;
     private BluetoothGattCharacteristic mRead, mEnable, mPeriod;
 
@@ -58,6 +54,10 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
     private Button mStart, mStop, mExport;
     private LineChart mChart;
 
+
+
+
+    private MiBand miband = new MiBand(getActivity());
     /**
      * Mandatory empty constructor.
      */
@@ -102,11 +102,13 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
         super.onPause();
     }
 
+
     /**
      * Creates a GATT connection to the given device.
      *
      * @param address String containing the address of the device
      */
+    SimpleDateFormat formatter = new SimpleDateFormat("HH:mm:ss:SSS", Locale.getDefault());
     private void connectDevice(String address) {
         if (!mBluetoothAdapter.isEnabled()) {
             Toast.makeText(getActivity(), R.string.state_off, Toast.LENGTH_SHORT).show();
@@ -114,114 +116,39 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
         }
         mListener.onShowProgress();
         BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
-        mGatt = device.connectGatt(getActivity(), false, mCallback);
+        miband.connect(device);
+        miband.setSensorDataNotifyListener(new BluetoothIO.RealtimeSensorNotifyListener() {
+            @Override
+            public void onNotify(double[][] axis) {
+
+            }
+            private void updateUI(final double[] result) {
+                if (mIsRecording) {
+                    Measurement measurement = new Measurement(result[0], result[1], result[2], formatter.format(Calendar.getInstance().getTime()));
+                    mRecording.add(measurement);
+                }
+                getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isAdded()) {// update current acceleration readings
+                            mXAxis.setText(String.format(getString(R.string.xAxis), Math.abs(result[0])));
+                            mYAxis.setText(String.format(getString(R.string.yAxis), Math.abs(result[1])));
+                            mZAxis.setText(String.format(getString(R.string.zAxis), Math.abs(result[2])));
+                            mXAxis.setTextColor(ContextCompat.getColor(getActivity(), result[0] < 0 ? R.color.red : R.color.green));
+                            mYAxis.setTextColor(ContextCompat.getColor(getActivity(), result[1] < 0 ? R.color.red : R.color.green));
+                            mZAxis.setTextColor(ContextCompat.getColor(getActivity(), result[2] < 0 ? R.color.red : R.color.green));
+                        }
+                    }
+                });
+            }
+        });
+        miband.enableSensorDataNotify();
+//        mGatt = device.connectGatt(getActivity(), false, mCallback);
     }
 
-    private BluetoothGattCallback mCallback = new BluetoothGattCallback() {
-        double result[];
-        SimpleDateFormat formatter = new SimpleDateFormat("HH:mm:ss:SSS", Locale.getDefault());
-        Calendar currentTime;
 
-        @Override
-        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            super.onConnectionStateChange(gatt, status, newState);
-            switch (newState) {
-                case BluetoothGatt.STATE_CONNECTED:
-                    // as soon as we're connected, discover services
-                    mGatt.discoverServices();
-                    break;
-            }
-        }
 
-        @Override
-        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-            super.onServicesDiscovered(gatt, status);
-            // as soon as services are discovered, acquire characteristic and try enabling
-            mMovService = mGatt.getService(UUID.fromString("F000AA80-0451-4000-B000-000000000000"));
-            mEnable = mMovService.getCharacteristic(UUID.fromString("F000AA82-0451-4000-B000-000000000000"));
-            if (mEnable == null) {
-                Toast.makeText(getActivity(), R.string.service_not_found, Toast.LENGTH_LONG).show();
-                getActivity().finish();
-            }
-            /**
-             * Bits starting with the least significant bit (the rightmost one)
-             * 0       Gyroscope z axis enable
-             * 1       Gyroscope y axis enable
-             * 2       Gyroscope x axis enable
-             * 3       Accelerometer z axis enable
-             * 4       Accelerometer y axis enable
-             * 5       Accelerometer x axis enable
-             * 6       Magnetometer enable (all axes)
-             * 7       Wake-On-Motion Enable
-             * 8:9	    Accelerometer range (0=2G, 1=4G, 2=8G, 3=16G)
-             * 10:15   Not used
-             */
-            mEnable.setValue(0b1000111000, BluetoothGattCharacteristic.FORMAT_UINT16, 0);
-            mGatt.writeCharacteristic(mEnable);
-        }
 
-        @Override
-        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            super.onCharacteristicWrite(gatt, characteristic, status);
-            if (characteristic == mEnable) {
-                // if enable was successful, set the sensor period to the lowest value
-                mPeriod = mMovService.getCharacteristic(UUID.fromString("F000AA83-0451-4000-B000-000000000000"));
-                if (mPeriod == null) {
-                    Toast.makeText(getActivity(), R.string.service_not_found, Toast.LENGTH_LONG).show();
-                    getActivity().finish();
-                }
-                mPeriod.setValue(0x0A, BluetoothGattCharacteristic.FORMAT_UINT8, 0);
-                mGatt.writeCharacteristic(mPeriod);
-            } else if (characteristic == mPeriod) {
-                // if setting sensor period was successful, start polling for sensor values
-                mRead = mMovService.getCharacteristic(UUID.fromString("F000AA81-0451-4000-B000-000000000000"));
-                if (mRead == null) {
-                    Toast.makeText(getActivity(), R.string.characteristic_not_found, Toast.LENGTH_LONG).show();
-                    getActivity().finish();
-                }
-                previousRead = Calendar.getInstance();
-                mGatt.readCharacteristic(mRead);
-                deviceConnected();
-            }
-        }
-
-        @Override
-        public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-            super.onCharacteristicRead(gatt, characteristic, status);
-            // convert raw byte array to G unit values for xyz axes
-            result = Util.convertAccel(characteristic.getValue());
-            if (mIsRecording) {
-                Measurement measurement = new Measurement(result[0], result[1], result[2], formatter.format(Calendar.getInstance().getTime()));
-                mRecording.add(measurement);
-            }
-            getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (isAdded()) {
-                        // update current acceleration readings
-                        mXAxis.setText(String.format(getString(R.string.xAxis), Math.abs(result[0])));
-                        mYAxis.setText(String.format(getString(R.string.yAxis), Math.abs(result[1])));
-                        mZAxis.setText(String.format(getString(R.string.zAxis), Math.abs(result[2])));
-                        mXAxis.setTextColor(ContextCompat.getColor(getActivity(), result[0] < 0 ? R.color.red : R.color.green));
-                        mYAxis.setTextColor(ContextCompat.getColor(getActivity(), result[1] < 0 ? R.color.red : R.color.green));
-                        mZAxis.setTextColor(ContextCompat.getColor(getActivity(), result[2] < 0 ? R.color.red : R.color.green));
-                    }
-                }
-            });
-            // poll for next values
-            currentTime = Calendar.getInstance();
-            long diff = currentTime.getTimeInMillis() - previousRead.getTimeInMillis();
-            if (diff < 100) {
-                try {
-                    Thread.sleep(100 - diff);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
-            previousRead = Calendar.getInstance();
-            mGatt.readCharacteristic(mRead);
-        }
-    };
 
     @Override
     public void onClick(View view) {
@@ -303,7 +230,9 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
     private void deviceDisconnected() {
         stopRecording();
         mStart.setEnabled(false);
-        if (mGatt != null) mGatt.disconnect();
+//        if (mGatt != null) mGatt.disconnect();
+        miband.io.gatt.disconnect();
+        miband.disableSensorDataNotify();
     }
 
     /**
@@ -405,4 +334,144 @@ public class DeviceFragment extends Fragment implements View.OnClickListener {
                     + " must implement OnStatusListener");
         }
     }
+
+    //read movement data
+
+//    private BluetoothGattCallback mCallback = new BluetoothGattCallback() {
+//        double result[];
+//        SimpleDateFormat formatter = new SimpleDateFormat("HH:mm:ss:SSS", Locale.getDefault());
+//        Calendar currentTime;
+//
+//        @Override
+//        public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+//            super.onConnectionStateChange(gatt, status, newState);
+//            Log.d(tag, "onConnectionStateChange");
+//            switch (newState) {
+//                case BluetoothGatt.STATE_CONNECTED:
+//                    // as soon as we're connected, discover services
+//                    mGatt.discoverServices();
+//                    break;
+//            }
+//
+//
+//        }
+//
+//        private String tag = "BluetoothGattCallback";
+//        @Override
+//        public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+//            super.onServicesDiscovered(gatt, status);
+//            Log.d(tag, "onServicesDiscovered");
+//            // as soon as services are discovered, acquire characteristic and try enabling
+//            mMovService = mGatt.getService(UUID.fromString("F000AA80-0451-4000-B000-000000000000"));
+//
+//
+//            mEnable = mMovService.getCharacteristic(UUID.fromString("F000AA82-0451-4000-B000-000000000000"));
+//            if (mEnable == null) {
+//                Toast.makeText(getActivity(), R.string.service_not_found, Toast.LENGTH_LONG).show();
+//                getActivity().finish();
+//            }
+//            /**
+//             * Bits starting with the least significant bit (the rightmost one)
+//             * 0       Gyroscope z axis enable
+//             * 1       Gyroscope y axis enable
+//             * 2       Gyroscope x axis enable
+//             * 3       Accelerometer z axis enable
+//             * 4       Accelerometer y axis enable
+//             * 5       Accelerometer x axis enable
+//             * 6       Magnetometer enable (all axes)
+//             * 7       Wake-On-Motion Enable
+//             * 8:9	    Accelerometer range (0=2G, 1=4G, 2=8G, 3=16G)
+//             * 10:15   Not used
+//             */
+//
+//            Log.d(tag, "set configuration");
+//            //set configuration
+//            mEnable.setValue(0b1000111000, BluetoothGattCharacteristic.FORMAT_UINT16, 0);
+//            mGatt.writeCharacteristic(mEnable);
+//
+//            //enable notification
+//            BluetoothGattCharacteristic characteristic = mMovService.getCharacteristic(UUID.fromString("F000AA81-0451-4000-B000-000000000000"));
+//            boolean enabled = true;
+//            mGatt.setCharacteristicNotification(characteristic, enabled);
+//            BluetoothGattDescriptor descriptor = characteristic.getDescriptor(
+//                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
+//
+//            Log.d(tag, "enable notification : " + String.valueOf(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE));
+//            descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+//            mGatt.writeDescriptor(descriptor);
+//
+//        }
+//
+//        @Override
+//        public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+//            super.onCharacteristicWrite(gatt, characteristic, status);
+//            Log.d(tag, "onCharacteristicWrite");
+//            if (characteristic == mEnable) {
+//                // if enable was successful, set the sensor period to the lowest value
+//                mPeriod = mMovService.getCharacteristic(UUID.fromString("F000AA83-0451-4000-B000-000000000000"));
+//                if (mPeriod == null) {
+//                    Toast.makeText(getActivity(), R.string.service_not_found, Toast.LENGTH_LONG).show();
+//                    getActivity().finish();
+//                }
+//                mPeriod.setValue(0x0A, BluetoothGattCharacteristic.FORMAT_UINT8, 0);
+//                mGatt.writeCharacteristic(mPeriod);
+//            } else if (characteristic == mPeriod) {
+//                // if setting sensor period was successful, start polling for sensor values
+//                mRead = mMovService.getCharacteristic(UUID.fromString("F000AA81-0451-4000-B000-000000000000"));
+//                if (mRead == null) {
+//                    Toast.makeText(getActivity(), R.string.characteristic_not_found, Toast.LENGTH_LONG).show();
+//                    getActivity().finish();
+//                }
+//                previousRead = Calendar.getInstance();
+//                mGatt.readCharacteristic(mRead);
+//                deviceConnected();
+//            }
+//        }
+//
+//
+//
+//
+//        private void updateUI(BluetoothGattCharacteristic characteristic) {
+//            result = Util.convertAccel(characteristic.getValue());
+//            if (mIsRecording) {
+//                Measurement measurement = new Measurement(result[0], result[1], result[2], formatter.format(Calendar.getInstance().getTime()));
+//                mRecording.add(measurement);
+//            }
+//            getActivity().runOnUiThread(new Runnable() {
+//                @Override
+//                public void run() {
+//                    if (isAdded()) {
+//                        // update current acceleration readings
+//                        mXAxis.setText(String.format(getString(R.string.xAxis), Math.abs(result[0])));
+//                        mYAxis.setText(String.format(getString(R.string.yAxis), Math.abs(result[1])));
+//                        mZAxis.setText(String.format(getString(R.string.zAxis), Math.abs(result[2])));
+//                        mXAxis.setTextColor(ContextCompat.getColor(getActivity(), result[0] < 0 ? R.color.red : R.color.green));
+//                        mYAxis.setTextColor(ContextCompat.getColor(getActivity(), result[1] < 0 ? R.color.red : R.color.green));
+//                        mZAxis.setTextColor(ContextCompat.getColor(getActivity(), result[2] < 0 ? R.color.red : R.color.green));
+//                    }
+//                }
+//            });
+//        }
+//        @Override
+//        public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+//            super.onCharacteristicRead(gatt, characteristic, status);
+//            Log.d(tag, "onCharacteristicRead");
+//            // convert raw byte array to G unit values for xyz axes
+//            updateUI(characteristic);
+//            mGatt.readCharacteristic(mRead);
+////             poll for next values
+//            currentTime = Calendar.getInstance();
+//            long diff = currentTime.getTimeInMillis() - previousRead.getTimeInMillis();
+//            if (diff < 100) {
+//                try {
+//                    Thread.sleep(100 - diff);
+//                } catch (InterruptedException e) {
+//                    e.printStackTrace();
+//                }
+//            }
+//            previousRead = Calendar.getInstance();
+//            mGatt.readCharacteristic(mRead);
+//        }
+//    };
+//
 }
